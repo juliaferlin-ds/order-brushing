@@ -1,0 +1,171 @@
+#standarsql
+with dataset as
+(
+	SELECT	
+		ds.orderid,
+		ds.shopid,
+		ds.userid,
+		EXTRACT(DATE FROM ds.event_time) as date,
+		EXTRACT(TIME FROM ds.event_time) as time,
+	FROM
+		`julia_order_brushing_dataset` ds
+),
+
+timeline as
+(
+  SELECT
+    shopid,
+    EXTRACT(DATE FROM event_time) as date,
+    EXTRACT(TIME FROM event_time) as time
+  FROM
+    `julia_order_brushing_dataset`
+  GROUP BY 1, 2, 3
+),
+
+concrate as
+(
+  SELECT
+    t.shopid,
+    t.date,
+    t.time,
+    COUNT(DISTINCT c.orderid)/COUNT(DISTINCT c.userid) as concrate_rate
+  FROM
+    timeline t
+  LEFT JOIN
+    `julia_order_brushing_dataset` c
+  ON
+    t.shopid= c.shopid
+    AND (EXTRACT(DATE FROM c.event_time) = t.date)
+    AND (EXTRACT(TIME FROM c.event_time) >= t.time )
+    AND (EXTRACT(TIME FROM c.event_time) <= TIME_ADD(t.time, INTERVAL 1 HOUR))
+  GROUP BY 1, 2, 3
+  HAVING COUNT(DISTINCT c.orderid) > 0
+  AND COUNT(DISTINCT c.userid) > 0
+),
+
+brushing as
+(
+	SELECT 
+		shopid,
+		date,
+		time,
+		concrate_rate
+	FROM
+		concrate
+	WHERE
+		concrate_rate >= 3
+),
+
+brushing_orders as
+(
+	SELECT
+		ds.orderid,
+		ds.shopid,
+		ds.userid,
+		ds.date,
+		ds.time,
+		CASE WHEN concrate_rate >= 3 THEN 1 ELSE NULL END as brushing_tag
+	FROM
+		dataset ds
+	LEFT JOIN
+		brushing bd
+	ON
+		ds.shopid = bd.shopid 
+		AND ds.date = bd.date
+		AND ds.time = bd.time
+),
+
+brusing_buyer as
+(
+	SELECT
+		ds.shopid,
+		ds.date,
+		ds.time,
+		ds.userid,
+		ds.brushing_tag,
+		total_user
+	FROM
+		(
+		SELECT
+			ds.shopid,
+			ds.date,
+			ds.time,
+			ds.userid,
+			ds.brushing_tag,
+			COUNT(t.userid) as total_user,
+		FROM
+			brushing_orders ds
+		LEFT JOIN
+			brushing_orders t
+		ON
+			ds.shopid = t.shopid
+			AND ds.date = t.date
+			AND t.time between ds.time and TIME_ADD(ds.time, INTERVAL 1 HOUR)
+		GROUP BY 1, 2, 3, 4, 5
+		) ds
+	GROUP BY 1, 2, 3, 4, 5, 6
+	having total_user = max(total_user)
+),
+
+final_data as
+(
+	SELECT
+		a.orderid,
+		ds.shopid,
+		ds.date,
+		ds.time,
+		ds.userid,
+		ds.brushing_tag
+	FROM
+		dataset a
+	INNER JOIN
+		brusing_buyer ds
+	ON
+		ds.shopid = a.shopid
+		AND a.userid = ds.userid
+		AND a.date = ds.date
+		AND a.time = ds.time
+),
+
+shop as
+(
+	SELECT 
+		distinct shopid
+	FROM
+		dataset
+),
+
+result as
+(
+	SELECT
+		s.shopid,
+		CASE WHEN userid is null THEN 0 ELSE userid END as userid
+	FROM
+		shop s
+	LEFT JOIN 
+		final_data f
+	ON
+		s.shopid = f.shopid
+		AND f.brushing_tag = 1
+  GROUP BY 1, 2
+),
+
+concat_value AS
+(
+SELECT 
+  shopid, 
+  STRING_AGG(CAST(userid AS STRING), "&" ORDER BY CAST(userid AS STRING) ASC) AS userid 
+FROM result
+WHERE userid is not null
+GROUP BY 1
+)
+
+SELECT
+*
+FROM concat_value
+UNION ALL
+SELECT
+shopid,
+CAST(userid AS STRING) as userid
+FROM result
+WHERE userid is null
